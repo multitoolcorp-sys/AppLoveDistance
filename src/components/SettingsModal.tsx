@@ -1,18 +1,19 @@
 import { useEffect, useState } from 'react';
 import { MapPin, Navigation, Sliders, Trash2, X } from 'lucide-react';
 import {
+  DevicePresence,
   LoveLogItem,
   LoveSettings,
-  NetworkLocation,
   PARTNER_CITY_PRESETS,
 } from '../utils/distance';
 
 interface SettingsModalProps {
   open: boolean;
+  myDeviceId: string;
   settings: LoveSettings;
   logs: LoveLogItem[];
   gpsStatus: string;
-  networkPartner: NetworkLocation | null;
+  networkPartner: DevicePresence | null;
   onClose: () => void;
   onSave: (next: LoveSettings) => void;
   onRequestGps: () => void;
@@ -21,6 +22,7 @@ interface SettingsModalProps {
 
 export function SettingsModal({
   open,
+  myDeviceId,
   settings,
   logs,
   gpsStatus,
@@ -70,9 +72,12 @@ export function SettingsModal({
         </div>
 
         <form onSubmit={handleSubmit} className="modal-sheet__form">
+          <div className="device-id-pill">
+            ID fijo del dispositivo: <strong>{myDeviceId}</strong>
+          </div>
           <div className="field-row">
             <label className="field">
-              <span>Tu nombre</span>
+              <span>Tu Alias (editable)</span>
               <input
                 type="text"
                 maxLength={20}
@@ -170,8 +175,8 @@ export function SettingsModal({
               {draft.partnerSource === 'network' && (
                 <small className="gps-hint">
                   <MapPin size={12} />{' '}
-                  {networkPartner
-                    ? `Recibiendo GPS de ${networkPartner.senderName} (${networkPartner.coords.lat.toFixed(4)}, ${networkPartner.coords.lng.toFixed(4)})`
+                  {networkPartner?.coords
+                    ? `Recibiendo GPS de ${networkPartner.alias} (${networkPartner.coords.lat.toFixed(4)}, ${networkPartner.coords.lng.toFixed(4)})`
                     : 'Esperando a que otro dispositivo en la red active su GPS (usando ciudad de respaldo mientras tanto).'}
                 </small>
               )}

@@ -11,12 +11,28 @@ export interface LoveLogItem {
   message: string;
 }
 
-export interface NetworkLocation {
-  senderId: string;
-  senderName: string;
-  coords: Coords;
+export interface DevicePresence {
+  deviceId: string;
+  alias: string;
+  coords: Coords | null;
   accuracy?: number;
-  updatedAt: string;
+  updatedAt?: string;
+}
+
+export interface MatchGroup {
+  id: string;
+  name: string;
+  memberIds: string[];
+}
+
+export interface MatchPendingState {
+  incoming: string[];
+  outgoing: string[];
+}
+
+export interface SelectedTarget {
+  type: 'user' | 'group';
+  id: string;
 }
 
 export interface LoveSettings {
@@ -52,6 +68,10 @@ export const DEFAULT_SETTINGS: LoveSettings = {
     : '',
 };
 
+const SETTINGS_KEY = 'love_distance_settings_v1';
+const LOGS_KEY = 'love_distance_logs_v1';
+const DEVICE_ID_KEY = 'love_distance_device_id_v1';
+
 /**
  * Builds an API URL from an optional base server URL (for Capacitor/native builds).
  */
@@ -60,8 +80,22 @@ export function buildApiUrl(serverUrl: string, path: string): string {
   return base ? `${base}${path}` : path;
 }
 
-const SETTINGS_KEY = 'love_distance_settings_v1';
-const LOGS_KEY = 'love_distance_logs_v1';
+/**
+ * Returns a persistent device ID for web browsers.
+ */
+export function getOrCreateWebDeviceId(): string {
+  try {
+    const existing = localStorage.getItem(DEVICE_ID_KEY);
+    if (existing) return existing;
+    const generated = `web-${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    localStorage.setItem(DEVICE_ID_KEY, generated);
+    return generated;
+  } catch {
+    return `web-${Date.now().toString(36)}`;
+  }
+}
 
 /**
  * Calculates great-circle distance between two coordinates in kilometers.

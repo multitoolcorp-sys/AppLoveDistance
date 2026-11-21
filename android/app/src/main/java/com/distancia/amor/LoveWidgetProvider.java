@@ -107,10 +107,16 @@ public class LoveWidgetProvider extends AppWidgetProvider {
                     senderName = "Tu Amor";
                 }
 
+                String deviceId = prefs.getString("deviceId", LoveWidgetPlugin.resolveDeviceId(context));
+                String targetType = prefs.getString("targetType", "user");
+                String targetId = prefs.getString("targetId", "");
+
                 JSONObject body = new JSONObject();
                 body.put("id", "widget-" + System.currentTimeMillis() + "-" + UUID.randomUUID().toString().substring(0, 6));
-                body.put("senderId", "widget-" + android.os.Build.MODEL);
-                body.put("senderName", senderName);
+                body.put("senderId", deviceId);
+                body.put("senderAlias", senderName);
+                body.put("targetType", targetType);
+                body.put("targetId", targetId);
                 body.put("message", "Te amo ❤️");
                 body.put("sentAt", timeLabel);
 

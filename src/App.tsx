@@ -1,28 +1,42 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Geolocation, type Position } from '@capacitor/geolocation';
-
-interface LoveWidgetBridge {
-  syncConfig(options: { senderName: string; serverUrl: string }): Promise<void>;
-}
-
-const LoveWidget = registerPlugin<LoveWidgetBridge>('LoveWidget');
-import { Heart, Settings, User, Wifi } from 'lucide-react';
+import { Heart, HeartHandshake, Settings, User, Wifi } from 'lucide-react';
 import { LovePlayerWidget } from './components/LovePlayerWidget';
+import { MatchModal } from './components/MatchModal';
 import { SettingsModal } from './components/SettingsModal';
 import {
   buildApiUrl,
   Coords,
+  DevicePresence,
   formatDistance,
+  getOrCreateWebDeviceId,
   haversineKm,
   loadLoveLogs,
   loadSettings,
   LoveLogItem,
   LoveSettings,
-  NetworkLocation,
+  MatchGroup,
+  MatchPendingState,
   saveLoveLogs,
   saveSettings,
+  SelectedTarget,
 } from './utils/distance';
+
+interface LoveWidgetBridge {
+  getDeviceId(): Promise<{ deviceId: string }>;
+  syncConfig(options: {
+    deviceId: string;
+    senderName: string;
+    serverUrl: string;
+    targetType: string;
+    targetId: string;
+    targetLabel: string;
+    targetDistance: string;
+  }): Promise<void>;
+}
+
+const LoveWidget = registerPlugin<LoveWidgetBridge>('LoveWidget');
 
 interface FloatingHeart {
   id: number;
@@ -34,44 +48,151 @@ interface FloatingHeart {
 interface NetworkLoveEvent {
   id: string;
   senderId: string;
-  senderName: string;
+  senderAlias: string;
+  targetType?: 'user' | 'group';
+  targetId?: string;
+  groupName?: string;
   message: string;
   sentAt: string;
 }
 
 export function App() {
+  const [myDeviceId, setMyDeviceId] = useState<string>(() =>
+    getOrCreateWebDeviceId()
+  );
   const [settings, setSettings] = useState<LoveSettings>(() => loadSettings());
   const [logs, setLogs] = useState<LoveLogItem[]>(() => loadLoveLogs());
   const [myCoords, setMyCoords] = useState<Coords | null>(null);
   const [myAccuracy, setMyAccuracy] = useState<number | null>(null);
-  const [networkPartner, setNetworkPartner] = useState<NetworkLocation | null>(
+
+  const [devices, setDevices] = useState<DevicePresence[]>([]);
+  const [matches, setMatches] = useState<string[]>([]);
+  const [pending, setPending] = useState<MatchPendingState>({
+    incoming: [],
+    outgoing: [],
+  });
+  const [groups, setGroups] = useState<MatchGroup[]>([]);
+  const [selectedTarget, setSelectedTarget] = useState<SelectedTarget | null>(
     null
   );
+
   const [gpsStatus, setGpsStatus] = useState<string>(
     'Activa el GPS para calcular la distancia real'
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [matchOpen, setMatchOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [hearts, setHearts] = useState<FloatingHeart[]>([]);
   const [networkOnline, setNetworkOnline] = useState(false);
   const [onlineCount, setOnlineCount] = useState(1);
 
-  const clientIdRef = useRef<string>(
-    `${Date.now()}-${Math.random().toString(16).slice(2)}`
-  );
   const seenIdsRef = useRef<Set<string>>(new Set());
   const browserWatchIdRef = useRef<number | null>(null);
   const nativeWatchIdRef = useRef<string | null>(null);
 
+  // Obtener ID fijo del teléfono en Android nativo
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+      void LoveWidget.getDeviceId()
+        .then((res) => {
+          if (res?.deviceId) {
+            setMyDeviceId(res.deviceId);
+          }
+        })
+        .catch(() => {
+          // Keep web fallback ID
+        });
+    }
+  }, []);
+
+  // Auto-seleccionar el primer match o grupo disponible si no hay uno activo
+  useEffect(() => {
+    setSelectedTarget((prev) => {
+      if (prev?.type === 'user' && matches.includes(prev.id)) return prev;
+      if (prev?.type === 'group' && groups.some((g) => g.id === prev.id)) {
+        return prev;
+      }
+      if (matches.length > 0) return { type: 'user', id: matches[0] };
+      if (groups.length > 0) return { type: 'group', id: groups[0].id };
+      return null;
+    });
+  }, [matches, groups]);
+
+  const activeUserDevice = useMemo(() => {
+    if (selectedTarget?.type === 'user') {
+      return devices.find((d) => d.deviceId === selectedTarget.id) ?? null;
+    }
+    const firstOther = devices.find(
+      (d) => d.deviceId !== myDeviceId && d.coords !== null
+    );
+    return firstOther ?? null;
+  }, [devices, myDeviceId, selectedTarget]);
+
+  const activeGroup = useMemo(() => {
+    if (selectedTarget?.type !== 'group') return null;
+    return groups.find((g) => g.id === selectedTarget.id) ?? null;
+  }, [groups, selectedTarget]);
+
   const targetCoords =
-    settings.partnerSource === 'network' && networkPartner
-      ? networkPartner.coords
+    settings.partnerSource === 'network' && activeUserDevice?.coords
+      ? activeUserDevice.coords
       : settings.partnerCoords;
 
   const distanciaKm =
     settings.mode === 'gps' && myCoords
       ? haversineKm(myCoords, targetCoords)
       : settings.manualDistanceKm;
+
+  const formattedDistance = formatDistance(distanciaKm);
+
+  const partnerLabel = activeGroup
+    ? activeGroup.name
+    : activeUserDevice
+    ? activeUserDevice.alias
+    : settings.partnerName;
+
+  // Distancias individuales cuando hay un Match Group seleccionado
+  const groupMemberDistances = useMemo(() => {
+    if (!activeGroup) return [];
+    return activeGroup.memberIds
+      .filter((id) => id !== myDeviceId)
+      .map((id) => {
+        const dev = devices.find((d) => d.deviceId === id);
+        const dist =
+          myCoords && dev?.coords
+            ? formatDistance(haversineKm(myCoords, dev.coords))
+            : 'GPS pendiente';
+        return {
+          id,
+          alias: dev?.alias ?? id.slice(0, 8),
+          dist,
+        };
+      });
+  }, [activeGroup, devices, myCoords, myDeviceId]);
+
+  // Sincronizar configuración, match activo y distancia con la notificación estilo Lark Player
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+      void LoveWidget.syncConfig({
+        deviceId: myDeviceId,
+        senderName: settings.myName || 'Tu Amor',
+        serverUrl: settings.serverUrl || 'https://applovedistance.onrender.com',
+        targetType: selectedTarget?.type ?? 'user',
+        targetId: selectedTarget?.id ?? '',
+        targetLabel: partnerLabel,
+        targetDistance: formattedDistance,
+      }).catch(() => {
+        // Ignore if plugin is unavailable
+      });
+    }
+  }, [
+    myDeviceId,
+    settings.myName,
+    settings.serverUrl,
+    selectedTarget,
+    partnerLabel,
+    formattedDistance,
+  ]);
 
   const publishLocation = useCallback(
     async (coords: Coords, accuracy?: number) => {
@@ -80,8 +201,8 @@ export function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            senderId: clientIdRef.current,
-            senderName: settings.myName || 'Tú',
+            deviceId: myDeviceId,
+            alias: settings.myName || 'Tú',
             coords,
             accuracy,
             updatedAt: new Date().toLocaleTimeString('es-ES', {
@@ -94,7 +215,7 @@ export function App() {
         // Ignore network errors when offline
       }
     },
-    [settings.myName, settings.serverUrl]
+    [myDeviceId, settings.myName, settings.serverUrl]
   );
 
   const applyPosition = useCallback(
@@ -136,15 +257,12 @@ export function App() {
     }
     browserWatchIdRef.current = navigator.geolocation.watchPosition(
       applyPosition,
-      () => {
-        // Keep last known position if a background watch tick fails
-      },
+      () => {},
       { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
     );
   }, [applyPosition]);
 
   const requestGps = useCallback(async () => {
-    // 1. Camino nativo (Android/iOS con Capacitor: sin navegador ni restricción HTTPS)
     if (Capacitor.isNativePlatform()) {
       try {
         setGpsStatus('Solicitando permiso GPS nativo...');
@@ -181,7 +299,6 @@ export function App() {
       return;
     }
 
-    // 2. Camino navegador web
     if (!('geolocation' in navigator)) {
       setGpsStatus('Tu navegador no soporta geolocalización.');
       return;
@@ -189,7 +306,7 @@ export function App() {
 
     if (!window.isSecureContext) {
       setGpsStatus(
-        'El navegador bloquea el GPS en HTTP de red local. Ábrelo en localhost, HTTPS o compílalo como app móvil.'
+        'El navegador bloquea el GPS en HTTP de red local. Ábrelo en localhost, HTTPS o APK.'
       );
       return;
     }
@@ -230,23 +347,11 @@ export function App() {
   }, [applyPosition, startBrowserWatchGps]);
 
   useEffect(() => {
-    if (Capacitor.isNativePlatform()) {
-      void LoveWidget.syncConfig({
-        senderName: settings.myName || 'Tu Amor',
-        serverUrl: settings.serverUrl || 'https://applovedistance.onrender.com',
-      }).catch(() => {
-        // Ignore if plugin is unavailable
-      });
-    }
-  }, [settings.myName, settings.serverUrl]);
-
-  useEffect(() => {
     if (settings.mode === 'gps') {
       void requestGps();
     } else {
       void clearGpsWatch();
     }
-
     return () => {
       void clearGpsWatch();
     };
@@ -273,10 +378,12 @@ export function App() {
       if (!payload?.id || seenIdsRef.current.has(payload.id)) return;
       seenIdsRef.current.add(payload.id);
 
-      const isMine = payload.senderId === clientIdRef.current;
-      if (isMine) return;
+      if (payload.senderId === myDeviceId) return;
 
-      const label = `${payload.senderName} te envió un "Te amo" ❤️`;
+      const prefix = payload.groupName
+        ? `[${payload.groupName}] ${payload.senderAlias}`
+        : payload.senderAlias;
+      const label = `${prefix}: "${payload.message}"`;
       setToastMessage(label);
       spawnHearts();
 
@@ -289,7 +396,7 @@ export function App() {
           {
             id: payload.id,
             sentAt: payload.sentAt,
-            message: `💖 Recibido de ${payload.senderName}`,
+            message: `💖 ${prefix}: ${payload.message}`,
           },
           ...prev,
         ].slice(0, 20);
@@ -297,101 +404,136 @@ export function App() {
         return next;
       });
     },
-    [spawnHearts]
+    [myDeviceId, spawnHearts]
   );
 
-  // Conexión en tiempo real a la red (SSE + fallback BroadcastChannel)
+  // Conexión en tiempo real a la red (SSE)
   useEffect(() => {
-    let source: EventSource | null = null;
-    let channel: BroadcastChannel | null = null;
+    const params = new URLSearchParams({
+      deviceId: myDeviceId,
+      alias: settings.myName || 'Tú',
+    });
+    const sseUrl = buildApiUrl(
+      settings.serverUrl,
+      `/api/events?${params.toString()}`
+    );
+    const source = new EventSource(sseUrl);
 
-    if ('BroadcastChannel' in window) {
-      channel = new BroadcastChannel('distancia-de-amor');
-      channel.onmessage = (ev) => {
-        if (ev.data?.type === 'love') {
-          handleIncomingLove(ev.data.payload as NetworkLoveEvent);
-        }
-      };
-    }
-
-    const connect = () => {
-      source = new EventSource(buildApiUrl(settings.serverUrl, '/api/events'));
-
-      source.onopen = () => {
-        setNetworkOnline(true);
-      };
-
-      source.addEventListener('presence', (ev) => {
-        try {
-          const data = JSON.parse((ev as MessageEvent).data) as {
-            onlineCount?: number;
-          };
-          if (typeof data.onlineCount === 'number') {
-            setOnlineCount(Math.max(1, data.onlineCount));
-          }
-        } catch {
-          // Ignore malformed event
-        }
-      });
-
-      source.addEventListener('love', (ev) => {
-        try {
-          const payload = JSON.parse(
-            (ev as MessageEvent).data
-          ) as NetworkLoveEvent;
-          handleIncomingLove(payload);
-        } catch {
-          // Ignore malformed event
-        }
-      });
-
-      source.addEventListener('location', (ev) => {
-        try {
-          const payload = JSON.parse(
-            (ev as MessageEvent).data
-          ) as NetworkLocation;
-          if (payload.senderId !== clientIdRef.current) {
-            setNetworkPartner(payload);
-          }
-        } catch {
-          // Ignore malformed event
-        }
-      });
-
-      source.addEventListener('locations_snapshot', (ev) => {
-        try {
-          const list = JSON.parse(
-            (ev as MessageEvent).data
-          ) as NetworkLocation[];
-          const other = list.find((l) => l.senderId !== clientIdRef.current);
-          if (other) {
-            setNetworkPartner(other);
-          }
-        } catch {
-          // Ignore malformed event
-        }
-      });
-
-      source.onerror = () => {
-        setNetworkOnline(false);
-      };
+    source.onopen = () => {
+      setNetworkOnline(true);
     };
 
-    connect();
+    source.addEventListener('presence_list', (ev) => {
+      try {
+        const data = JSON.parse((ev as MessageEvent).data) as {
+          onlineCount?: number;
+          devices?: DevicePresence[];
+        };
+        if (typeof data.onlineCount === 'number') {
+          setOnlineCount(Math.max(1, data.onlineCount));
+        }
+        if (Array.isArray(data.devices)) {
+          setDevices(data.devices);
+        }
+      } catch {
+        // Ignore malformed event
+      }
+    });
+
+    source.addEventListener('match_state', (ev) => {
+      try {
+        const data = JSON.parse((ev as MessageEvent).data) as {
+          matches?: string[];
+          pending?: MatchPendingState;
+          groups?: MatchGroup[];
+        };
+        if (Array.isArray(data.matches)) setMatches(data.matches);
+        if (data.pending) setPending(data.pending);
+        if (Array.isArray(data.groups)) setGroups(data.groups);
+      } catch {
+        // Ignore malformed event
+      }
+    });
+
+    source.addEventListener('love', (ev) => {
+      try {
+        const payload = JSON.parse(
+          (ev as MessageEvent).data
+        ) as NetworkLoveEvent;
+        handleIncomingLove(payload);
+      } catch {
+        // Ignore malformed event
+      }
+    });
+
+    source.onerror = () => {
+      setNetworkOnline(false);
+    };
 
     return () => {
-      source?.close();
-      channel?.close();
+      source.close();
     };
-  }, [handleIncomingLove, settings.serverUrl]);
+  }, [handleIncomingLove, myDeviceId, settings.myName, settings.serverUrl]);
 
   useEffect(() => {
     if (!toastMessage) return;
-    const timer = window.setTimeout(() => setToastMessage(null), 2600);
+    const timer = window.setTimeout(() => setToastMessage(null), 2800);
     return () => window.clearTimeout(timer);
   }, [toastMessage]);
 
+  const handleRequestMatch = async (targetId: string) => {
+    try {
+      await fetch(buildApiUrl(settings.serverUrl, '/api/match/request'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromId: myDeviceId, toId: targetId }),
+      });
+      setToastMessage('Solicitud de Match enviada 💖');
+    } catch {
+      setToastMessage('No se pudo enviar la solicitud.');
+    }
+  };
+
+  const handleRespondMatch = async (fromId: string, accept: boolean) => {
+    try {
+      await fetch(buildApiUrl(settings.serverUrl, '/api/match/respond'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromId, toId: myDeviceId, accept }),
+      });
+      setToastMessage(accept ? '¡Nuevo Match activado! 💖' : 'Solicitud rechazada');
+    } catch {
+      setToastMessage('Error al responder Match.');
+    }
+  };
+
+  const handleCreateGroup = async (name: string, memberIds: string[]) => {
+    try {
+      const res = await fetch(
+        buildApiUrl(settings.serverUrl, '/api/group/create'),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, ownerId: myDeviceId, memberIds }),
+        }
+      );
+      const data = (await res.json()) as { ok?: boolean; group?: MatchGroup };
+      if (data.ok && data.group) {
+        setSelectedTarget({ type: 'group', id: data.group.id });
+        setToastMessage(`Match Group "${data.group.name}" creado 💖`);
+      }
+    } catch {
+      setToastMessage('No se pudo crear el grupo.');
+    }
+  };
+
   const handleEnviarTeAmo = async () => {
+    if (!selectedTarget) {
+      setMatchOpen(true);
+      setToastMessage('Primero haz Match con alguien para enviar ❤️');
+      return;
+    }
+
     const now = new Date();
     const timeLabel = now.toLocaleTimeString('es-ES', {
       hour: '2-digit',
@@ -401,46 +543,46 @@ export function App() {
     const eventId = `${now.getTime()}-${Math.random().toString(16).slice(2)}`;
     seenIdsRef.current.add(eventId);
 
-    const payload: NetworkLoveEvent = {
+    const payload = {
       id: eventId,
-      senderId: clientIdRef.current,
-      senderName: settings.myName || 'Tú',
+      senderId: myDeviceId,
+      senderAlias: settings.myName || 'Tú',
+      targetType: selectedTarget.type,
+      targetId: selectedTarget.id,
       message: 'Te amo ❤️',
       sentAt: timeLabel,
     };
 
-    const nextLogs: LoveLogItem[] = [
-      {
-        id: eventId,
-        sentAt: timeLabel,
-        message: `Enviaste un "Te amo" a la red ❤️`,
-      },
-      ...logs,
-    ].slice(0, 20);
-
-    setLogs(nextLogs);
-    saveLoveLogs(nextLogs);
-    setToastMessage('¡Enviaste un "Te amo" a toda la red! ❤️');
-    spawnHearts();
-
-    if ('vibrate' in navigator) {
-      navigator.vibrate?.(35);
-    }
-
-    if ('BroadcastChannel' in window) {
-      const ch = new BroadcastChannel('distancia-de-amor');
-      ch.postMessage({ type: 'love', payload });
-      ch.close();
-    }
-
     try {
-      await fetch(buildApiUrl(settings.serverUrl, '/api/love'), {
+      const res = await fetch(buildApiUrl(settings.serverUrl, '/api/love'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
+      if (!res.ok) {
+        setToastMessage('Necesitas tener Match activo para enviar.');
+        return;
+      }
+
+      const nextLogs: LoveLogItem[] = [
+        {
+          id: eventId,
+          sentAt: timeLabel,
+          message: `Enviaste "Te amo" a ${partnerLabel} ❤️`,
+        },
+        ...logs,
+      ].slice(0, 20);
+
+      setLogs(nextLogs);
+      saveLoveLogs(nextLogs);
+      setToastMessage(`¡Enviaste "Te amo" a ${partnerLabel}! ❤️`);
+      spawnHearts();
+
+      if ('vibrate' in navigator) {
+        navigator.vibrate?.(35);
+      }
     } catch {
-      // Offline / static fallback already handled
+      setToastMessage('Sin conexión al servidor.');
     }
   };
 
@@ -453,6 +595,15 @@ export function App() {
     };
     setSettings(normalized);
     saveSettings(normalized);
+
+    void fetch(buildApiUrl(normalized.serverUrl, '/api/profile'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: myDeviceId,
+        alias: normalized.myName,
+      }),
+    }).catch(() => {});
   };
 
   const handleClearLogs = () => {
@@ -460,17 +611,11 @@ export function App() {
     saveLoveLogs([]);
   };
 
-  const partnerLabel =
-    settings.mode === 'gps' &&
-    settings.partnerSource === 'network' &&
-    networkPartner
-      ? networkPartner.senderName
-      : settings.partnerName;
+  const totalTargets = matches.length + groups.length;
 
   return (
     <div className="app-viewport">
       <main className="phone-shell">
-        {/* Floating Hearts Burst */}
         <div className="hearts-layer" aria-hidden="true">
           {hearts.map((h) => (
             <span
@@ -490,16 +635,73 @@ export function App() {
         {/* Header superior */}
         <header className="top-header">
           <h1 className="top-header__title">Nuestra Conexión 💖</h1>
-          <button
-            type="button"
-            className="icon-btn"
-            onClick={() => setSettingsOpen(true)}
-            aria-label="Abrir configuración"
-            title="Configurar conexión"
-          >
-            <Settings size={22} />
-          </button>
+          <div className="header-actions">
+            <button
+              type="button"
+              className="icon-btn icon-btn--badge"
+              onClick={() => setMatchOpen(true)}
+              aria-label="Conexiones y Match"
+              title="Conexiones y Match"
+            >
+              <HeartHandshake size={20} />
+              {pending.incoming.length > 0 && (
+                <span className="notif-dot">{pending.incoming.length}</span>
+              )}
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => setSettingsOpen(true)}
+              aria-label="Abrir configuración"
+              title="Configurar conexión"
+            >
+              <Settings size={20} />
+            </button>
+          </div>
         </header>
+
+        {/* Selector rápido si hay más de 1 match o grupo */}
+        {totalTargets > 1 && (
+          <div className="target-strip" aria-label="Elegir destinatario">
+            {matches.map((id) => {
+              const dev = devices.find((d) => d.deviceId === id);
+              const isSel =
+                selectedTarget?.type === 'user' && selectedTarget.id === id;
+              const dist =
+                myCoords && dev?.coords
+                  ? formatDistance(haversineKm(myCoords, dev.coords))
+                  : '';
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  className={`target-chip ${isSel ? 'target-chip--active' : ''}`}
+                  onClick={() => setSelectedTarget({ type: 'user', id })}
+                >
+                  <span>{dev?.alias ?? id.slice(0, 6)}</span>
+                  {dist && <small>· {dist}</small>}
+                </button>
+              );
+            })}
+            {groups.map((grp) => {
+              const isSel =
+                selectedTarget?.type === 'group' &&
+                selectedTarget.id === grp.id;
+              return (
+                <button
+                  key={grp.id}
+                  type="button"
+                  className={`target-chip ${isSel ? 'target-chip--active' : ''}`}
+                  onClick={() =>
+                    setSelectedTarget({ type: 'group', id: grp.id })
+                  }
+                >
+                  <span>👥 {grp.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Contenido central */}
         <div className="center-content">
@@ -524,8 +726,24 @@ export function App() {
               </div>
             </div>
 
-            <p className="distance-label">Están separados por</p>
-            <div className="distance-value">{formatDistance(distanciaKm)}</div>
+            {activeGroup ? (
+              <>
+                <p className="distance-label">Distancias del Match Group</p>
+                <div className="group-distances">
+                  {groupMemberDistances.map((m) => (
+                    <div key={m.id} className="group-dist-row">
+                      <span>{m.alias}</span>
+                      <strong>{m.dist}</strong>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="distance-label">Están separados por</p>
+                <div className="distance-value">{formattedDistance}</div>
+              </>
+            )}
 
             <div className="live-badge">
               <span
@@ -542,7 +760,7 @@ export function App() {
                   : networkOnline
                   ? `En red · ${onlineCount} ${
                       onlineCount === 1 ? 'conectado' : 'conectados'
-                    }`
+                    } · ${matches.length} match`
                   : 'Ubicación actualizada en vivo'}
               </span>
             </div>
@@ -571,7 +789,6 @@ export function App() {
           </button>
         </footer>
 
-        {/* Snackbar flotante */}
         {toastMessage && (
           <div className="love-snackbar" role="status" aria-live="polite">
             <Heart size={18} fill="#FFFFFF" color="#FFFFFF" />
@@ -579,12 +796,31 @@ export function App() {
           </div>
         )}
 
+        <MatchModal
+          open={matchOpen}
+          myDeviceId={myDeviceId}
+          myCoords={myCoords}
+          devices={devices}
+          matches={matches}
+          pending={pending}
+          groups={groups}
+          selectedTarget={selectedTarget}
+          onClose={() => setMatchOpen(false)}
+          onRequestMatch={(id) => void handleRequestMatch(id)}
+          onRespondMatch={(fromId, accept) =>
+            void handleRespondMatch(fromId, accept)
+          }
+          onCreateGroup={(name, ids) => void handleCreateGroup(name, ids)}
+          onSelectTarget={(t) => setSelectedTarget(t)}
+        />
+
         <SettingsModal
           open={settingsOpen}
+          myDeviceId={myDeviceId}
           settings={settings}
           logs={logs}
           gpsStatus={gpsStatus}
-          networkPartner={networkPartner}
+          networkPartner={activeUserDevice}
           onClose={() => setSettingsOpen(false)}
           onSave={handleSaveSettings}
           onRequestGps={() => void requestGps()}
