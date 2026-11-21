@@ -1,3 +1,5 @@
+import { Capacitor } from '@capacitor/core';
+
 export interface Coords {
   lat: number;
   lng: number;
@@ -45,7 +47,9 @@ export const DEFAULT_SETTINGS: LoveSettings = {
   manualDistanceKm: 10450.5,
   partnerCity: 'Tokio, Japón',
   partnerCoords: { lat: 35.6762, lng: 139.6503 },
-  serverUrl: '',
+  serverUrl: Capacitor.isNativePlatform()
+    ? 'https://applovedistance.onrender.com'
+    : '',
 };
 
 /**
