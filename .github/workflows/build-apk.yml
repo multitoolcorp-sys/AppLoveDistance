@@ -30,19 +30,9 @@ jobs:
           npm ci
           npm run build
 
-      - name: Generate and sync Capacitor Android project
+      - name: Sync Capacitor Android project
         run: |
-          if [ ! -d "android" ]; then
-            npx cap add android
-          fi
           npx cap sync android
-
-      - name: Ensure Android GPS permissions in AndroidManifest.xml
-        run: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if ! grep -q "ACCESS_FINE_LOCATION" "$MANIFEST"; then
-            sed -i 's|<uses-permission android:name="android.permission.INTERNET" />|<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />|' "$MANIFEST"
-          fi
 
       - name: Build Debug APK
         run: |

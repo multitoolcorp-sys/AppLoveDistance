@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Geolocation, type Position } from '@capacitor/geolocation';
+
+interface LoveWidgetBridge {
+  syncConfig(options: { senderName: string; serverUrl: string }): Promise<void>;
+}
+
+const LoveWidget = registerPlugin<LoveWidgetBridge>('LoveWidget');
 import { Heart, Settings, User, Wifi } from 'lucide-react';
 import { LovePlayerWidget } from './components/LovePlayerWidget';
 import { SettingsModal } from './components/SettingsModal';
@@ -222,6 +228,17 @@ export function App() {
       { enableHighAccuracy: true, timeout: 8000, maximumAge: 15000 }
     );
   }, [applyPosition, startBrowserWatchGps]);
+
+  useEffect(() => {
+    if (Capacitor.isNativePlatform()) {
+      void LoveWidget.syncConfig({
+        senderName: settings.myName || 'Tu Amor',
+        serverUrl: settings.serverUrl || 'https://applovedistance.onrender.com',
+      }).catch(() => {
+        // Ignore if plugin is unavailable
+      });
+    }
+  }, [settings.myName, settings.serverUrl]);
 
   useEffect(() => {
     if (settings.mode === 'gps') {
